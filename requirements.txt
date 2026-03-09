@@ -1,6 +1,9 @@
 scikit-learn
-panda
+pandas
 numpy
 streamlit
 matplotlib
 seaborn
+shap
+plotly
+fpdf
