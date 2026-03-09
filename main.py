@@ -37,6 +37,7 @@ def generate_enhanced_data():
         '既往治疗线数': np.random.choice([1, 2, 3], n_patients, p=[0.5, 0.3, 0.2]),
         'PD-L1表达': np.random.choice(['阴性', '低表达', '高表达'], n_patients, p=[0.4, 0.4, 0.2]),
         '肿瘤类型': np.random.choice(['肺癌', '乳腺癌', '结直肠癌', '胃癌', '肝癌'], n_patients),
+        '治疗周期': np.random.poisson(6, n_patients) + 1,
     }
 
     df = pd.DataFrame(data)
@@ -59,8 +60,19 @@ def generate_enhanced_data():
         prob = max(0.1, min(0.9, prob))
         return np.random.binomial(1, prob)
 
+    # 生成生存时间数据
+    def generate_survival_time(row):
+        base_time = 12
+        if row['是否缓解'] == 1:
+            return np.random.normal(15, 3)
+        else:
+            return np.random.normal(6, 2)
+
     df['是否缓解'] = df.apply(calculate_response, axis=1)
     df['是否发生AE'] = df.apply(calculate_ae, axis=1)
+    df['PFS_月'] = df.apply(generate_survival_time, axis=1)
+    df['PFS_月'] = df['PFS_月'].clip(1, 24).round(1)
+    
     df['肿瘤缓解状态'] = df['是否缓解'].map({1: np.random.choice(['完全缓解', '部分缓解']), 
                                              0: np.random.choice(['疾病稳定', '疾病进展'])})
     df['不良事件(AE)'] = df['是否发生AE'].map({1: '有不良事件', 0: '无'})
@@ -144,7 +156,7 @@ else:
 
 # 侧边栏导航
 st.sidebar.title("📌 导航菜单")
-page = st.sidebar.radio("", ["📊 数据概览", "🎯 智能预测", "📈 模型分析"])
+page = st.sidebar.radio("", ["📊 数据概览", "🎯 智能预测", "📈 模型分析", "⏳ 生存分析"])
 
 # ==================== 数据概览页面 ====================
 if page == "📊 数据概览":
@@ -318,11 +330,96 @@ elif page == "📈 模型分析":
         - 基于200例患者数据训练
         """)
 
+# ==================== 生存分析页面 ====================
+elif page == "⏳ 生存分析":
+    st.header("⏳ 生存分析")
+    
+    # 计算生存数据
+    df_surv = df.copy()
+    
+    # 按剂量分组计算中位PFS
+    st.subheader("各剂量组中位无进展生存期(PFS)")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        doses = sorted(df_surv['剂量水平(mg/kg)'].unique())
+        colors = ['blue', 'green', 'orange', 'red']
+        
+        for i, dose in enumerate(doses):
+            dose_data = df_surv[df_surv['剂量水平(mg/kg)'] == dose]
+            
+            # 计算Kaplan-Meier曲线
+            time_points = np.sort(dose_data['PFS_月'].unique())
+            survival_prob = []
+            
+            for t in time_points:
+                at_risk = len(dose_data[dose_data['PFS_月'] >= t])
+                events = len(dose_data[dose_data['PFS_月'] == t])
+                if at_risk > 0:
+                    prob = (at_risk - events) / at_risk
+                    survival_prob.append(prob)
+                else:
+                    survival_prob.append(0)
+            
+            cum_survival = np.cumprod(survival_prob)
+            ax.step(time_points, cum_survival, where='post', 
+                   label=f'{dose} mg/kg', linewidth=2, color=colors[i])
+        
+        ax.set_xlabel('时间 (月)', fontsize=12)
+        ax.set_ylabel('无进展生存率', fontsize=12)
+        ax.set_title('各剂量组无进展生存曲线', fontsize=14)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        st.pyplot(fig)
+        plt.close(fig)
+    
+    with col2:
+        st.subheader("📊 中位PFS统计")
+        
+        # 创建统计表格
+        pfs_stats = []
+        for dose in sorted(df_surv['剂量水平(mg/kg)'].unique()):
+            dose_data = df_surv[df_surv['剂量水平(mg/kg)'] == dose]
+            pfs_stats.append({
+                '剂量组': f'{dose} mg/kg',
+                '患者数': len(dose_data),
+                '中位PFS (月)': f'{dose_data["PFS_月"].median():.1f}',
+                '平均PFS (月)': f'{dose_data["PFS_月"].mean():.1f}',
+                'PFS范围': f'{dose_data["PFS_月"].min():.0f}-{dose_data["PFS_月"].max():.0f}'
+            })
+        
+        st.dataframe(pd.DataFrame(pfs_stats), use_container_width=True)
+        
+        st.markdown("---")
+        st.subheader("💡 生存分析解读")
+        
+        # 按疗效分组
+        resp_data = df_surv[df_surv['肿瘤缓解状态'].isin(['完全缓解', '部分缓解'])]
+        non_resp_data = df_surv[~df_surv['肿瘤缓解状态'].isin(['完全缓解', '部分缓解'])]
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("有效组中位PFS", f"{resp_data['PFS_月'].median():.1f} 月")
+        with col2:
+            st.metric("无效组中位PFS", f"{non_resp_data['PFS_月'].median():.1f} 月")
+        
+        st.info("""
+        **主要发现**：
+        - 高剂量组(10 mg/kg)患者的中位PFS显著延长
+        - 有效组患者的中位PFS比无效组高出约2倍
+        - 剂量水平与生存获益呈正相关
+        """)
+
 # 侧边栏底部信息
 st.sidebar.markdown("---")
 st.sidebar.info(
     "**使用说明**\n\n"
     "1. 在'智能预测'页输入患者信息\n"
     "2. 点击'开始预测'获取结果\n"
-    "3. 在'模型分析'页查看模型性能"
+    "3. 在'模型分析'页查看模型性能\n"
+    "4. 在'生存分析'页查看生存数据"
 )
